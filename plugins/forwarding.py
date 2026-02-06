@@ -24,6 +24,7 @@ import asyncio
 
 lock = asyncio.Lock()
 logger = logging.getLogger(__name__)
+BATCH_SIZE = 50 # number of messages to forward in one batch per worker, adjust based on performance and rate limits
 
 async def progress_updater(bot: Client, job_id: str, settings: dict):
     try:
@@ -108,104 +109,94 @@ async def run_partition(bot: Client, part: dict, settings: dict):
         f"{part['start_msg_id']} → {part['end_msg_id']}"
     )
 
-    c_cap = settings["cap_template"]
-    c_btn = settings["btn_template"]
-
     await db.parts.update_one(
         {"_id": part["_id"]},
         {"$set": {"status": "running"}}
     )
 
+    last_msg_id = part.get("current_msg_id", part["start_msg_id"])
+
     try:
-        cursor = db.deliveries.find({
-            "job_id": part["job_id"],
-            "forwarded": False,
-            "last_source.msg_id": {
-                "$gte": part["current_msg_id"],
-                "$lte": part["end_msg_id"]
-            }
-        }).sort("last_source.msg_id", 1)
-
-        async for doc in cursor:
-            switched_target = temp.TARGET_CACHE.get(part["job_id"])
-
+        while True:
             if temp.CANCEL_FORWARD:
-                return await db.parts.update_one(
+                await db.parts.update_one(
                     {"_id": part["_id"]},
                     {"$set": {"status": "cancelled", "updated_at": datetime.now(timezone.utc)}}
                 )
-            elif switched_target and switched_target != doc["target_chat"]:
-                # target chat has been switched by progress updater due to limit reached
-                logger.info(f"[{bot.me.username}] Switching target chat for job {part['job_id']} to {switched_target}")
-                doc["target_chat"] = switched_target
+                return
 
-                try:
-                    await db.deliveries.update_one(
-                        {"_id": doc["_id"]},
-                        {"$set": {"target_chat": switched_target}}
-                    )
-                except DuplicateKeyError:
-                    # delivery with new target chat already exists, skip updating
-                    pass
-            
-            msg = None
-            while True:
+            # 🔹 fetch small batch
+            docs = await db.deliveries.find({
+                "job_id": part["job_id"],
+                "forwarded": False,
+                "last_source.msg_id": {
+                    "$gte": last_msg_id,
+                    "$lte": part["end_msg_id"]
+                }
+            }).sort("last_source.msg_id", 1).limit(BATCH_SIZE).to_list(length=BATCH_SIZE)
+
+            if not docs:
+                break  # partition done
+
+            for doc in docs:
                 try:
                     msg = await bot.copy_message(
                         doc["target_chat"],
                         doc["last_source"]["chat_id"],
                         doc["last_source"]["msg_id"],
                         caption=render_caption(
-                            c_cap,
-                            file_name=doc['file_name'],
-                            file_size=doc['file_size'],
-                            caption=doc['caption']
-                        ) if settings['custom_caption'] else None,
+                            settings["cap_template"],
+                            file_name=doc["file_name"],
+                            file_size=doc["file_size"],
+                            caption=doc["caption"]
+                        ) if settings["custom_caption"] else None,
                         parse_mode=enums.ParseMode.HTML,
-                        reply_markup=to_pyrogram_keyboard(parse_keyboard(c_btn), False) if settings['custom_btn'] and c_btn else None
+                        reply_markup=to_pyrogram_keyboard(
+                            parse_keyboard(settings["btn_template"]),
+                            False
+                        ) if settings["custom_btn"] else None
                     )
-                    break
                 except FloodWait as e:
-                    logger.warning(f"[{bot.me.username}] Flood wait {e.value} seconds")
-                    print(f"[{bot.me.username}] Flood wait {e.value} seconds")
+                    logger.warning(f"[{bot.me.username}] FloodWait {e.value}s")
                     await asyncio.sleep(e.value)
+                    continue
                 except Exception as e:
-                    logger.exception(f"[{bot.me.username}] Failed to forward message {doc['last_source']['msg_id']} to {doc['target_chat']}: {e}")
-                    print(f"[{bot.me.username}] Failed to forward message {doc['last_source']['msg_id']} to {doc['target_chat']}: {e}")
-                    raise          
-            
-            if msg:
-                # mark delivered
-                await db.mark_delivered(doc["_id"])
+                    logger.exception(f"[{bot.me.username}] Forward failed: {e}")
+                    continue
 
-            # update progress
-            await db.parts.update_one(
-                {"_id": part["_id"]},
-                {
-                    "$set": {
-                        "current_msg_id": doc["last_source"]["msg_id"],
-                        "updated_at": datetime.now(timezone.utc)
+                if msg:
+                    await db.mark_delivered(doc["_id"])
+
+                last_msg_id = doc["last_source"]["msg_id"]
+
+                # 🔹 persist progress aggressively (safe resume)
+                await db.parts.update_one(
+                    {"_id": part["_id"]},
+                    {
+                        "$set": {
+                            "current_msg_id": last_msg_id,
+                            "updated_at": datetime.now(timezone.utc)
+                        }
                     }
-                }
-            )
+                )
 
-            await asyncio.sleep(2)  # to avoid hitting flood limits
+                await asyncio.sleep(2)  # keep Telegram happy
 
         await db.parts.update_one(
             {"_id": part["_id"]},
             {"$set": {"status": "done"}}
         )
         return True
+
     except Exception as e:
-        logger.exception(f"[{bot.me.username}] Partition failed")
-        print(f"{bot.me.username} - Partition failed: {e}")
+        logger.exception(f"[{bot.me.username}] Partition crashed: {e}")
         await db.parts.update_one(
             {"_id": part["_id"]},
             {
                 "$set": {
                     "status": "failed",
                     "error": str(e),
-                    "updated_at": datetime.utcnow()
+                    "updated_at": datetime.now(timezone.utc)
                 }
             }
         )
