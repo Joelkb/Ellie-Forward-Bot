@@ -6,7 +6,7 @@ For inquiries or requests regarding the use of this code, please contact github.
 Media indexing utilities for Ellie Forward Bot.
 """
 
-from config import temp
+from config import configVars, temp
 from database import db
 from typing import Union
 from pyrogram.errors import FloodWait
@@ -21,13 +21,6 @@ import logging
 SAVE_BATCH = 50 # number of files to save in one batch
 logger = logging.getLogger(__name__)
 lock = asyncio.Lock()
-p_msg = """<b>Process Status: {status}
-Total messages fetched: {t_msgs}
-Total messages saved: {s_msgs}
-Duplicate Files Skipped: {d_files}
-Deleted Messages Skipped: {d_msgs}
-Non-Media messages skipped: {n_msgs}
-Errors Occurred: {err}</b>"""
 
 @Client.on_message((filters.document | filters.video) & filters.forwarded & filters.private & filters.incoming)
 async def index_handler(bot: Client, msg: Message):
@@ -51,36 +44,67 @@ async def index_handler(bot: Client, msg: Message):
             True,
             enums.ParseMode.HTML
         )
-    
-    target_chat = t_chats[0]
-    skip = settings.get("skip", 0)
-    switch_chats = t_chats[1:]
 
     if len(t_chats) == 1:
         await msg.reply_text(
-            f"<b>No other target channel found except {target_chat}, therefore auto-switch and limit won't work.</b>"
+            f"<b>No other target channel found except {t_chats[0]}, therefore auto-switch and limit won't work.</b>"
         )
 
     if temp.CANCEL_FORWARD:
         temp.CANCEL_FORWARD = False
 
+    return await msg.reply_text(
+        "What do you wanna do? Index and Forward or Direct Forward?",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Index and Forward", callback_data=f"action:index:{msg.forward_from_message_id}:{msg.forward_origin.chat.id}")],
+            [InlineKeyboardButton("Direct Forward", callback_data=f"action:direct:{msg.forward_from_message_id}:{msg.forward_origin.chat.id}")]
+        ]),
+        quote=True
+    )
+
+async def direct_forward_handler(bot: Client, msg: Message, l_msg_id: int, target_chat: int, source_chat: int):
+    settings = await db.get_settings()
+    f_msg_id = settings.get('skip', 0)
+    switch_chats = settings.get('target_chats', [])
+    w_client = settings.get('worker_clients', [])
+
+    job_id = await db.insert_job(
+        source_id=source_chat,
+        l_msg_id=l_msg_id,
+        status="forwarding",
+        t_chat=target_chat,
+        switch_chats=switch_chats,
+        w_client=w_client,
+        p_chat_id=msg.chat.id,
+        p_msg_id=msg.id,
+        skip=f_msg_id,
+        is_direct=True
+    )
+    
     btn = [[InlineKeyboardButton("Cancel Forwarding ❌", callback_data="c_frwd:")]]
-    p_rply = await msg.reply_text(
-        f"<code>Forwarding media(s) to {target_chat}...</code>\n\n"+p_msg.format(
+    p_rply = await msg.edit_text(
+        f"<code>Forwarding media(s) to {target_chat}...</code>\n\n"+configVars.p_msg.format(
             status="Initializing...",
-            t_msgs=skip,
+            t_msgs=f_msg_id,
             s_msgs=0,
             d_files=0,
             d_msgs=0,
             n_msgs=0,
             err=0
         ),
-        True,
         enums.ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(btn)
     )
 
-    await index_media_handler(bot, msg, skip, p_rply, target_chat, switch_chats, w_client)
+    await start_forwarding(
+        bot,
+        job_id,
+        p_rply,
+        w_client,
+        is_direct=True,
+        skip=f_msg_id,
+        l_msg_id=l_msg_id
+    )
 
 async def resume_indexing_job(bot: Client, job: dict):
     source_id = job["source_id"]
@@ -162,7 +186,7 @@ async def resume_indexing_job(bot: Client, job: dict):
     )
 
 
-async def index_media_handler(bot: Client, msg: Message, skip: int, progress_msg: Message, target_chat: int, switch_chats: list, w_client: list):
+async def index_media_handler(bot: Client, msg: Message, skip: int, progress_msg: Message, target_chat: int, switch_chats: list, w_client: list, msg_id: int, source_chat: int):
     t_msgs = skip # Total messages fetched
     s_msgs = 0 # Total messages saved
     d_files = 0 # Duplicate files skipped
@@ -172,8 +196,8 @@ async def index_media_handler(bot: Client, msg: Message, skip: int, progress_msg
     tasks = []
 
     job_id = await db.insert_job(
-        source_id=msg.forward_origin.chat.id,
-        l_msg_id=msg.forward_origin.message_id,
+        source_id=source_chat,
+        l_msg_id=msg_id,
         status="indexing",
         t_chat=target_chat,
         switch_chats=switch_chats,
@@ -187,15 +211,15 @@ async def index_media_handler(bot: Client, msg: Message, skip: int, progress_msg
         try:
             temp.CANCEL_FORWARD = False
             async for message in bot.iter_messages(
-                chat_id=msg.forward_origin.chat.id,
-                limit=msg.forward_origin.message_id,
+                chat_id=int(source_chat),
+                limit=int(msg_id),
                 offset=skip
             ):
                 if temp.CANCEL_FORWARD:
                     temp.CANCEL_FORWARD = False
                     await db.remove_job(job_id)
                     return await progress_msg.edit_text(
-                        "<code>Process CANCELED !</code>\n\n"+p_msg.format(
+                        "<code>Process CANCELED !</code>\n\n"+configVars.p_msg.format(
                             status="Cancelled!",
                             t_msgs=t_msgs,
                             s_msgs=s_msgs,
@@ -227,7 +251,7 @@ async def index_media_handler(bot: Client, msg: Message, skip: int, progress_msg
 
                     try:
                         await progress_msg.edit_text(
-                            "<code>Indexing media(s)...</code>\n\n"+p_msg.format(
+                            "<code>Indexing media(s)...</code>\n\n"+configVars.p_msg.format(
                                 status="Indexing...",
                                 t_msgs=t_msgs,
                                 s_msgs=s_msgs,
@@ -277,10 +301,10 @@ async def index_media_handler(bot: Client, msg: Message, skip: int, progress_msg
                     tasks.clear()
         except Exception as e:
             err += 1
-            logger.error(f"Error while indexing message: {e}")
+            logger.error(f"Error while indexing message: {e}", exc_info=True)
             await db.update_job_status(job_id, "failed")
             return await progress_msg.edit_text(
-                "<code>Indexing interrupted due to an error !</code>\n\n"+p_msg.format(
+                "<code>Indexing interrupted due to an error !</code>\n\n"+configVars.p_msg.format(
                     status="Error!",
                     t_msgs=t_msgs,
                     s_msgs=s_msgs,
@@ -301,7 +325,7 @@ async def index_media_handler(bot: Client, msg: Message, skip: int, progress_msg
             tasks.clear()
 
         await progress_msg.edit_text(
-            "<code>Indexing completed !</code>\n\n"+p_msg.format(
+            "<code>Indexing completed !</code>\n\n"+configVars.p_msg.format(
                 status="Completed!",
                 t_msgs=t_msgs,
                 s_msgs=s_msgs,

@@ -59,13 +59,13 @@ class DataBase:
             "failed_parts": failed_parts
         }
 
-    async def create_partitions(self, job_id: str, workers: list):
+    async def create_partitions(self, job_id: str, workers: list, is_direct: bool = False, skip: int = 0, l_msg_id: int = 0) -> None:
         docs = self.deliveries.find(
             {"job_id": job_id},
             {"last_source.msg_id": 1}
         )
-
-        msg_ids = sorted([d["last_source"]["msg_id"] async for d in docs])
+        
+        msg_ids = sorted([d["last_source"]["msg_id"] async for d in docs]) if not is_direct else list(range(int(skip) + 1, int(l_msg_id) + 1))
         if not msg_ids:
             return
 
@@ -88,6 +88,8 @@ class DataBase:
                 "end_msg_id": end,
                 "current_msg_id": start,
                 "status": "pending",
+                "progress": 0,
+                "total": end - start + 1,
                 "error": None,
                 "updated_at": datetime.now(timezone.utc)
             })
@@ -149,7 +151,8 @@ class DataBase:
         w_client: list,
         p_chat_id: int,
         p_msg_id: int,
-        skip: int = 0
+        skip: int = 0,
+        is_direct: bool = False
     ) -> str:
         job_id = uuid.uuid4().hex
 
@@ -161,6 +164,7 @@ class DataBase:
             "t_chat": t_chat,
             "switch_chats": switch_chats,
             "worker_clients": w_client,
+            "is_direct": is_direct,
 
             # indexing resume fields
             "index_cursor": skip,           # last processed message id / offset

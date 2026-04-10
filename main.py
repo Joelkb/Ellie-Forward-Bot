@@ -71,21 +71,24 @@ class Bot(Client):
 
             # Notify user
             try:
-                await self.edit_message_text(
+                p_msg = await self.edit_message_text(
                     job["progress_chat_id"],
                     job["progress_msg_id"],
                     "<b>♻️ Bot restarted.\nResuming forwarding…</b>",
                     parse_mode=enums.ParseMode.HTML
                 )
             except Exception:
+                p_msg = None
                 pass
 
             asyncio.create_task(
                 start_forwarding(
                     self,
                     job["_id"],
-                    None,
-                    job["worker_clients"]
+                    p_msg,
+                    job["worker_clients"],
+                    job['is_direct'],
+                    l_msg_id=job.get('l_msg_id', 0)
                 )
             )
 

@@ -26,7 +26,7 @@ lock = asyncio.Lock()
 logger = logging.getLogger(__name__)
 BATCH_SIZE = 50 # number of messages to forward in one batch per worker, adjust based on performance and rate limits
 
-async def progress_updater(bot: Client, job_id: str, settings: dict):
+async def progress_updater(bot: Client, job_id: str, settings: dict, is_direct: bool = False):
     try:
         await lock.acquire()
         job = await db.jobs.find_one({"_id": job_id})
@@ -40,18 +40,45 @@ async def progress_updater(bot: Client, job_id: str, settings: dict):
 
         while True:
             job = await db.jobs.find_one({"_id": job_id})
+            if is_direct:
+                parts = await db.parts.find({"job_id": job_id}).to_list(length=None)
+                g_progress = sum([p.get("progress", 0) for p in parts])
+                g_total = sum([p.get("total", 0) for p in parts])
+                percentage = (g_progress / g_total * 100) if g_total > 0 else 0
+            else:
+                parts = []  # placeholder 
+                g_progress = 0 # placeholder 
+                g_total = 0 # placeholder 
+                percentage = 0 # placeholder
+
             if job["status"] not in ("forwarding", "resuming"):
-                return await bot.edit_message_text(
-                    chat_id,
-                    msg_id,
-                    f"<b>📤 Forwarding Progress</b>\n\n"
-                    f"Status: <code>{job['status'].upper()}</code>\n"
-                    f"Total files: <b>{(await db.deliveries.count_documents({'job_id': job_id}))}</b>\n"
-                    f"Forwarded: <b>{(await db.deliveries.count_documents({'job_id': job_id, 'forwarded': True}))}</b>\n"
-                    f"Pending: <b>{(await db.deliveries.count_documents({'job_id': job_id, 'forwarded': False}))}</b>\n"
-                    f"Failed workers: <b>{(await db.parts.count_documents({'job_id': job_id, 'status': 'failed'}))}</b>",
-                    parse_mode=enums.ParseMode.HTML
-                )
+                if not is_direct:
+                    return await bot.edit_message_text(
+                        chat_id,
+                        msg_id,
+                        f"<b>📤 Forwarding Progress</b>\n\n"
+                        f"Status: <code>{job['status'].upper()}</code>\n"
+                        f"Total files: <b>{(await db.deliveries.count_documents({'job_id': job_id}))}</b>\n"
+                        f"Forwarded: <b>{(await db.deliveries.count_documents({'job_id': job_id, 'forwarded': True}))}</b>\n"
+                        f"Pending: <b>{(await db.deliveries.count_documents({'job_id': job_id, 'forwarded': False}))}</b>\n"
+                        f"Failed workers: <b>{(await db.parts.count_documents({'job_id': job_id, 'status': 'failed'}))}</b>",
+                        parse_mode=enums.ParseMode.HTML
+                    ) 
+                
+                else:
+                    await bot.edit_message_text(
+                        chat_id,
+                        msg_id,
+                        f"<b>📤 Direct Forwarding Progress</b>\n\n"
+                        f"<b>Partition Status:</b>\n"
+                        f"Status: <code>{job['status'].upper()}</code>\n"
+                        f"Total Parts: <b>{len(parts)}</b>\n"
+                        f"Progress: <b>{g_progress}</b>\n"
+                        f"Total: <b>{g_total}</b>\n"
+                        f"Percentage: <b>{percentage:.2f}%</b>\n"
+                        f"Failed workers: <b>{(await db.parts.count_documents({'job_id': job_id, 'status': 'failed'}))}</b>\n",
+                        parse_mode=enums.ParseMode.HTML
+                    )
             
             progress = await db.get_job_progress(job_id)
             limit = settings.get('limit', 0)
@@ -84,6 +111,15 @@ async def progress_updater(bot: Client, job_id: str, settings: dict):
                 f"Forwarded: <b>{progress['done']}</b>\n"
                 f"Pending: <b>{progress['pending']}</b>\n"
                 f"Failed workers: <b>{progress['failed_parts']}</b>"
+            ) if not is_direct else (
+                f"<b>📤 Direct Forwarding Progress</b>\n\n"
+                f"<b>Partition Status:</b>\n"
+                f"Status: <code>{job['status'].upper()}</code>\n"
+                f"Total Parts: <b>{len(parts)}</b>\n"
+                f"Progress: <b>{g_progress}</b>\n"
+                f"Total: <b>{g_total}</b>\n"
+                f"Percentage: <b>{percentage:.2f}%</b>\n"
+                f"Failed workers: <b>{(await db.parts.count_documents({'job_id': job_id, 'status': 'failed'}))}</b>\n"
             )
 
             try:
@@ -103,10 +139,10 @@ async def progress_updater(bot: Client, job_id: str, settings: dict):
     finally:
         lock.release()
 
-async def run_partition(bot: Client, part: dict, settings: dict):
+async def run_partition(bot: Client, part: dict, settings: dict, is_direct: bool = False, job_id: str = None):
     logger.info(
         f"[{bot.me.username}] Running partition "
-        f"{part['start_msg_id']} → {part['end_msg_id']}"
+        f"{part['start_msg_id']} -> {part['end_msg_id']}"
     )
 
     await db.parts.update_one(
@@ -117,38 +153,33 @@ async def run_partition(bot: Client, part: dict, settings: dict):
     last_msg_id = part.get("current_msg_id", part["start_msg_id"])
 
     try:
-        while True:
-            if temp.CANCEL_FORWARD:
-                await db.parts.update_one(
-                    {"_id": part["_id"]},
-                    {"$set": {"status": "cancelled", "updated_at": datetime.now(timezone.utc)}}
-                )
+        # Check if it's direct, then forward directly with source chat id and msg id without checking deliveries collection, 
+        # otherwise fetch from deliveries collection as before. This ensures that in direct forwarding, 
+        # we forward exactly the messages that are in the source channel without missing any due to indexing issues.
+        if is_direct:
+            job = await db.jobs.find_one({"_id": job_id})
+            if not job:
+                logger.error(f"Job {job_id} not found for direct forwarding.")
                 return
-
-            # 🔹 fetch small batch
-            docs = await db.deliveries.find({
-                "job_id": part["job_id"],
-                "forwarded": False,
-                "last_source.msg_id": {
-                    "$gte": last_msg_id,
-                    "$lte": part["end_msg_id"]
-                }
-            }).sort("last_source.msg_id", 1).limit(BATCH_SIZE).to_list(length=BATCH_SIZE)
-
-            if not docs:
-                break  # partition done
-
-            for doc in docs:
+            
+            for m_id in range(part.get('start_msg_id', 1), part.get('end_msg_id', 0) + 1):
+                if temp.CANCEL_FORWARD:
+                    await db.parts.update_one(
+                        {"_id": part["_id"]},
+                        {"$set": {"status": "cancelled", "updated_at": datetime.now(timezone.utc)}}
+                    )
+                    return
+                
                 try:
                     msg = await bot.copy_message(
-                        doc["target_chat"],
-                        doc["last_source"]["chat_id"],
-                        doc["last_source"]["msg_id"],
+                        int(job["t_chat"]),
+                        int(job["source_id"]),  # use cached target chat or fallback to worker config
+                        m_id,
                         caption=render_caption(
                             settings["cap_template"],
-                            file_name=doc["file_name"],
-                            file_size=doc["file_size"],
-                            caption=doc["caption"]
+                            file_name=f"Message {m_id}",
+                            file_size="Unknown",
+                            caption="",
                         ) if settings["custom_caption"] else None,
                         parse_mode=enums.ParseMode.HTML,
                         reply_markup=to_pyrogram_keyboard(
@@ -165,22 +196,88 @@ async def run_partition(bot: Client, part: dict, settings: dict):
                     continue
 
                 if msg:
-                    await db.mark_delivered(doc["_id"])
+                    logger.info(f"[{bot.me.username}] Forwarded message {m_id} to {job['t_chat']}")
 
-                last_msg_id = doc["last_source"]["msg_id"]
+                last_msg_id = m_id
 
-                # 🔹 persist progress aggressively (safe resume)
+                # persist progress aggressively (safe resume)
                 await db.parts.update_one(
                     {"_id": part["_id"]},
                     {
                         "$set": {
                             "current_msg_id": last_msg_id,
+                            "progress": max(0, int(last_msg_id) - int(part["start_msg_id"]) + 1),
                             "updated_at": datetime.now(timezone.utc)
                         }
                     }
                 )
 
                 await asyncio.sleep(2)  # keep Telegram happy
+        else:
+            while True:
+                if temp.CANCEL_FORWARD:
+                    await db.parts.update_one(
+                        {"_id": part["_id"]},
+                        {"$set": {"status": "cancelled", "updated_at": datetime.now(timezone.utc)}}
+                    )
+                    return
+
+                # 🔹 fetch small batch
+                docs = await db.deliveries.find({
+                    "job_id": part["job_id"],
+                    "forwarded": False,
+                    "last_source.msg_id": {
+                        "$gte": last_msg_id,
+                        "$lte": part["end_msg_id"]
+                    }
+                }).sort("last_source.msg_id", 1).limit(BATCH_SIZE).to_list(length=BATCH_SIZE)
+
+                if not docs:
+                    break  # partition done
+
+                for doc in docs:
+                    try:
+                        msg = await bot.copy_message(
+                            doc["target_chat"],
+                            doc["last_source"]["chat_id"],
+                            doc["last_source"]["msg_id"],
+                            caption=render_caption(
+                                settings["cap_template"],
+                                file_name=doc["file_name"],
+                                file_size=doc["file_size"],
+                                caption=doc["caption"]
+                            ) if settings["custom_caption"] else None,
+                            parse_mode=enums.ParseMode.HTML,
+                            reply_markup=to_pyrogram_keyboard(
+                                parse_keyboard(settings["btn_template"]),
+                                False
+                            ) if settings["custom_btn"] else None
+                        )
+                    except FloodWait as e:
+                        logger.warning(f"[{bot.me.username}] FloodWait {e.value}s")
+                        await asyncio.sleep(e.value)
+                        continue
+                    except Exception as e:
+                        logger.exception(f"[{bot.me.username}] Forward failed: {e}")
+                        continue
+
+                    if msg:
+                        await db.mark_delivered(doc["_id"])
+
+                    last_msg_id = doc["last_source"]["msg_id"]
+
+                    # 🔹 persist progress aggressively (safe resume)
+                    await db.parts.update_one(
+                        {"_id": part["_id"]},
+                        {
+                            "$set": {
+                                "current_msg_id": last_msg_id,
+                                "updated_at": datetime.now(timezone.utc)
+                            }
+                        }
+                    )
+
+                    await asyncio.sleep(2)  # keep Telegram happy
 
         await db.parts.update_one(
             {"_id": part["_id"]},
@@ -202,18 +299,18 @@ async def run_partition(bot: Client, part: dict, settings: dict):
         )
         return False
 
-async def start_forwarding(bot: Client, job_id: str, p_msg: Message, w_client: list) -> None:
+async def start_forwarding(bot: Client, job_id: str, p_msg: Message, w_client: list, is_direct: bool = False, skip: int = 0, l_msg_id: int = 0) -> None:
     if lock.locked():
         return await p_msg.edit_text("❌ Another forwarding operation is in progress. Please wait until it finishes.") if p_msg else None
 
     if not await db.partitions_exist(job_id):
-        await db.create_partitions(job_id, w_client)
+        await db.create_partitions(job_id, w_client, is_direct, skip, l_msg_id)
 
     await db.update_job_status(job_id, "forwarding")
     settings = await db.get_settings()
 
     updater_task = asyncio.create_task(
-        progress_updater(bot, job_id, settings)
+        progress_updater(bot, job_id, settings, is_direct)
     )
 
     tasks = []
@@ -226,7 +323,7 @@ async def start_forwarding(bot: Client, job_id: str, p_msg: Message, w_client: l
             await db.remove_job(job_id)
             return await p_msg.edit_text("❌ Forwarding failed: Worker with prefix {worker_prefix} is not initialized.\n\nDeleting job data...") if p_msg else None
 
-        tasks.append(asyncio.create_task(run_partition(worker_bot, part, settings)))
+        tasks.append(asyncio.create_task(run_partition(worker_bot, part, settings, is_direct, job_id)))
 
 
     await asyncio.gather(*tasks)

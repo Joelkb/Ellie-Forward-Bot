@@ -6,9 +6,10 @@ For inquiries or requests regarding the use of this code, please contact github.
 Callback query handlers for settings and worker management.
 """
 
-from config import temp
+from config import configVars, temp
 from database import db
 from typing import Optional
+from plugins.index import direct_forward_handler, index_media_handler
 from plugins.workers import WORKER_CLIENTS, init_worker_clients
 from helpers.caption_parser import human_readable_size
 from pyrogram import Client, enums, filters
@@ -231,6 +232,35 @@ async def callback_handler(client: Client, query: CallbackQuery):
                     )
                 except MessageNotModified:
                     return await query.answer()
+                
+    elif data.startswith("action:"):
+        _, action, l_msg_id, f_chat_id = data.split(":")
+        settings = await db.get_settings()
+        t_chats = settings.get("target_chats", [])
+        w_client = settings.get("worker_clients", [])
+
+        target_chat = t_chats[0]
+        skip = settings.get("skip", 0)
+        switch_chats = t_chats[1:]
+        if action == 'index':
+            btn = [[InlineKeyboardButton("Cancel Forwarding ❌", callback_data="c_frwd:")]]
+            p_rply = await query.message.edit_text(
+                f"<code>Forwarding media(s) to {target_chat}...</code>\n\n"+configVars.p_msg.format(
+                    status="Initializing...",
+                    t_msgs=skip,
+                    s_msgs=0,
+                    d_files=0,
+                    d_msgs=0,
+                    n_msgs=0,
+                    err=0
+                ),
+                enums.ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup(btn)
+            )
+
+            await index_media_handler(client, query.message, skip, p_rply, target_chat, switch_chats, w_client, l_msg_id, f_chat_id)
+        else:
+            await direct_forward_handler(client, query.message, l_msg_id, target_chat, f_chat_id)
                 
     elif data.startswith("worker:"):
         token_prefix = data.split(":", 1)[1]
