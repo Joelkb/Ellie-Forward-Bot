@@ -52,6 +52,15 @@ class Bot(Client):
         
         logging.info(f"Bot started with username @{b_object.username}")
 
+        """
+        # Debug: Test iter_messages
+        try:
+            async for msg in self.iter_messages(chat_id_here, 2922398, 2917068):
+                print(f"Message ID: {msg.id}, Text: {msg.text}")
+        except Exception as e:
+            logging.error(f"Error during startup: {e}", exc_info=True)
+        """
+
         # await self.resume_interrupted_indexing()
         await self.resume_interrupted_jobs()  # forwarding
 
@@ -149,7 +158,7 @@ class Bot(Client):
             new_diff = min(200, limit - current)
             if new_diff <= 0:
                 return
-            messages = await self.get_messages(chat_id, list(range(current, current+new_diff+1)))
+            messages = await self.get_messages(chat_id, list(range(current, current+new_diff+1)), replies=0)
             for message in messages:
                 yield message
                 current += 1
