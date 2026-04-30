@@ -2,3 +2,4 @@ motor
 pyrofork
 tgcrypto
 aiohttp
+python-dotenv
