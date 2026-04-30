@@ -49,8 +49,8 @@ Supports dynamic routing with two target channels:
 1.  **Main Target:** The primary forwarding destination.
 2.  **Switch Channel:** The fallback destination used when the primary limit is reached.
 
-[!NOTE]
-*If only one target is set, limits are ignored.*
+> [!NOTE]
+> *If only one target is set, limits are ignored.*
 
 **Commands:**
 * `/limit` — Set the forwarding limit.
@@ -98,7 +98,7 @@ Choose the strategy that best fits your immediate needs:
 4.  **Select Strategy:** Choose either **Direct Forward** or **Index + Forward** to begin the operation.
 
 > [!IMPORTANT]
-> **Channel Requirements**
+> **Channel Requirements**<br>
 > All worker bots and the parent bot **must** be administrators/members of both the **Source channel** and the **Target channel(s)**. This is strictly required for accessing messages and forwarding from private channels.
 
 ---
@@ -135,8 +135,8 @@ DATABASE_URI=your_mongodb_connection_string
 python3 main.py
 ```
 
-[!NOTE]
-*Worker bot tokens, admins, and target chats are added dynamically at runtime via the bot's settings menu.*
+> [!NOTE]
+> *Worker bot tokens, admins, and target chats are added dynamically at runtime via the bot's settings menu.*
 
 ---
 
