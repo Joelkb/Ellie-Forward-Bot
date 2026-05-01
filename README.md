@@ -157,6 +157,13 @@ python3 main.py
 
 ---
 
+## 🙏 Acknowledgement
+
+>**_This project was developed based on an idea and requirements provided by a <a href="https://github.com/caproger">client</a>.  
+Special thanks for the concept._**
+
+---
+
 <div align="center">
   <b>👨‍💻 Author</b><br>
   <a href="[https://github.com/Joelkb](https://github.com/Joelkb)">Joel Kurian Biju</a><br>
