@@ -178,7 +178,7 @@ async def run_partition(bot: Client, part: dict, settings: dict, is_direct: bool
                         caption=render_caption(
                             settings["cap_template"],
                             file_name=f"Message {m_id}",
-                            file_size="Unknown",
+                            file_size=None,
                             caption="",
                         ) if settings["custom_caption"] else None,
                         parse_mode=enums.ParseMode.HTML,
