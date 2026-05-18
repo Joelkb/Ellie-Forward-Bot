@@ -54,6 +54,7 @@ Supports dynamic routing with two target channels:
 
 **Commands:**
 * `/limit` — Set the forwarding limit.
+* `/settings` — To access the settings menu. 
 * `/skip` — Skip a specific number of messages.
 
 > [!TIP]
